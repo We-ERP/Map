@@ -1,0 +1,55 @@
+name: Fetch Egypt GIS data
+
+# يشغّل السكريبت من زر في GitHub ثم يحفظ الملف داخل الريبو تلقائياً
+on:
+  workflow_dispatch:
+    inputs:
+      query:
+        description: 'اسم المنطقة (مثال: المرج، القاهرة، مصر)'
+        required: true
+        default: 'المرج، القاهرة، مصر'
+        type: string
+      output:
+        description: 'مسار ملف الإخراج'
+        required: true
+        default: 'data/marg-cairo.geojson'
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests shapely
+
+      - name: Fetch data from OpenStreetMap
+        env:
+          QUERY: ${{ inputs.query }}
+          OUTPUT: ${{ inputs.output }}
+        run: python fetch_egypt_gis.py --query "$QUERY" --out "$OUTPUT"
+
+      - name: Commit the GeoJSON file
+        env:
+          OUTPUT: ${{ inputs.output }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$OUTPUT"
+          if git diff --cached --quiet; then
+            echo "لا توجد تغييرات جديدة"
+          else
+            git commit -m "data: update $OUTPUT"
+            git push
+          fi

@@ -836,13 +836,18 @@ function partitionBlocks(parcels, boundary, k, seed, colorSeed) {
   const cells = (vor?.features || []).filter(Boolean);
 
   const raw = [];
-  for (const s of sites) {
-    const cell = cells.find((c) => turf.booleanPointInPolygon(s, c));
-    if (!cell) continue;
-    let clipped = null;
-    try { clipped = turf.intersect(cell, boundary); } catch (_) { clipped = null; }
-    if (clipped) raw.push({ site: s, feature: clipped });
+  for (let i = 0; i < sites.length; i++) {
+    const s = sites[i];
+    const cell = cells.find((c) => turf.booleanPointInPolygon(s, c)) || cells[i] || null;
+    let poly = null;
+    if (cell) {
+      try { poly = turf.intersect(cell, boundary); } catch (_) { poly = null; }
+      if (!poly) poly = cell;
+    }
+    if (!poly) poly = turf.buffer(turf.point(s), 0.2, { units: 'kilometers' });
+    raw.push({ site: s, feature: poly });
   }
+  if (!raw.length) throw new Error('تعذّر تقسيم المنطقة إلى بلوكات');
 
   const width = turf.distance([bb[0], bb[1]], [bb[2], bb[1]], { units: 'meters' });
   const height = turf.distance([bb[0], bb[1]], [bb[0], bb[3]], { units: 'meters' });
@@ -880,6 +885,7 @@ function partitionBlocks(parcels, boundary, k, seed, colorSeed) {
 }
 
 function assignParcels(parcels, blocks) {
+  if (!blocks.length) return;
   blocks.forEach((b) => { b.parcels = []; });
 
   for (const p of parcels) {
@@ -977,7 +983,12 @@ function rebuildBlocks() {
   try {
     state.blocks = partitionBlocks(a.parcels, a.boundary, state.blockCount, a.seed, state.colorSeed);
   } catch (err) {
+    console.error(err);
     toast(err.message, 4500);
+    return;
+  }
+  if (!state.blocks.length) {
+    toast('تعذّر إنشاء البلوكات لهذه المنطقة', 4500);
     return;
   }
   assignParcels(a.parcels, state.blocks);
