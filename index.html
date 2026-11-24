@@ -7,15 +7,11 @@
   <meta name="description" content="نظام خرائط تفاعلي لتقسيم المناطق في مصر إلى بلوكات وقطع وتصديرها بدقة عالية." />
   <meta name="theme-color" content="#0E1A24" />
 
-  <!-- Fonts -->
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@300;400;600;700;800&display=swap" rel="stylesheet" />
 
-  <!-- Leaflet -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" crossorigin="" />
-
-  <!-- App styles -->
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
@@ -57,6 +53,17 @@
 
   <!-- ===== Control panel ===== -->
   <aside class="panel" id="panel" aria-label="لوحة التحكم">
+
+    <section class="card">
+      <div class="card-head">
+        <h2>مصدر البيانات</h2>
+      </div>
+      <div class="export-grid">
+        <label class="btn" for="fileInput" id="uploadLabel">رفع ملف GeoJSON</label>
+        <input id="fileInput" type="file" accept=".geojson,.json,application/geo+json,application/json" hidden />
+      </div>
+      <p class="data-note">ارفع ملف GeoJSON جاهز (من سكريبت fetch_egypt_gis.py) لتحميل فوري بدون انتظار الإنترنت.</p>
+    </section>
 
     <section class="card">
       <div class="card-head">
@@ -163,7 +170,6 @@
 
   <div class="toast" id="toast" role="alert" hidden></div>
 
-  <!-- ===== Scripts ===== -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js" crossorigin=""></script>
   <script src="https://cdn.jsdelivr.net/npm/@turf/turf@7.1.0/turf.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>

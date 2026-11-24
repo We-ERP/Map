@@ -1,9 +1,8 @@
 /* =========================================================================
-   app.js — منطق التطبيق
-   - جلب الحدود والشوارع والمباني من Nominatim و Overpass (OpenStreetMap)
-   - توليد تلقائي للقطع الناقصة (Smart Fallback) بخوارزمية مكانية
-   - تقسيم المنطقة إلى بلوكات: K-Means + Voronoi مقصوص بحدود المنطقة (Turf.js)
-   - الخرائط التفاعلية، لوحة التفاصيل، والبحث الفوري
+   app.js — منطق التطبيق (نسخة محسّنة للسرعة وظهور البيانات)
+   - تحميل من ملف محلي (data/*.geojson) أو رفع ملف من الواجهة (الأسرع)
+   - إن لم يتوفر ملف: استعلام Overpass داخل حدود المنطقة (poly) بمهلة ومحاولات متوازية
+   - توليد ذكي للقطع الناقصة + تقسيم K-Means/Voronoi
    ========================================================================= */
 'use strict';
 
@@ -11,19 +10,22 @@
 const CONFIG = {
   defaultQuery: 'المرج، القاهرة، مصر',
   defaultLabel: 'المرج - القاهرة',
-  // ملفات GeoJSON مُجهّزة مسبقًا عبر fetch_egypt_gis.py (اختياري)
   prebuilt: [{ match: ['المرج'], file: 'data/marg-cairo.geojson' }],
   nominatimUrl: 'https://nominatim.openstreetmap.org/search',
   overpassEndpoints: [
     'https://overpass-api.de/api/interpreter',
     'https://overpass.kumi.systems/api/interpreter',
   ],
-  syntheticSpacingM: 18,   // المسافة بين نقاط توليد القطع على طول الشارع
-  sideOffsetM: 11,         // بُعد القطعة عن محور الشارع
-  maxSynthetic: 7000,      // سقف القطع المولّدة للحفاظ على الأداء
+  overpassTimeoutMs: 45000,
+  polySimplifyTolerance: 0.0004,
+  polyMaxPoints: 150,
+  syntheticSpacingM: 18,
+  sideOffsetM: 11,
+  maxSynthetic: 7000,
   houseLabelMinZoom: 17,
   blockCountDefault: 35,
   blockCountMax: 200,
+  cacheLimitChars: 4500000,
 };
 
 const TILE = {
@@ -105,7 +107,7 @@ const state = {
   busy: false,
 };
 
-/* ---------- Feedback: progress & toast ---------- */
+/* ---------- Progress & toast ---------- */
 function showProgress(title, pct = 0) {
   $('progressTitle').textContent = title;
   $('progress').hidden = false;
@@ -206,6 +208,12 @@ function bindUI() {
     loadArea(q, q);
   });
 
+  $('fileInput').addEventListener('change', (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (file) loadFromFile(file);
+    e.target.value = '';
+  });
+
   $('themeBtn').addEventListener('click', () => applyTheme(isDark() ? 'light' : 'dark'));
   $('panelToggle').addEventListener('click', () => $('panel').classList.toggle('is-hidden'));
 
@@ -247,7 +255,7 @@ function bindUI() {
 }
 
 /* =========================================================================
-   1) Loading the area
+   1) Loading
    ========================================================================= */
 function findPrebuilt(label) {
   const n = norm(label);
@@ -264,12 +272,12 @@ async function loadArea(query, label) {
   try {
     let data = null;
     const file = findPrebuilt(label);
-    if (file) data = await loadPrebuilt(file).catch(() => null);
+    if (file) {
+      data = await loadPrebuiltUrl(file);
+      if (!data) toast('ملف البيانات المحلي غير موجود، سيتم التحميل من الإنترنت', 4200);
+    }
     if (!data) data = await loadFromNetwork(query);
-    setProgress(96, 'رسم البلوكات');
-    await tick();
-    applyArea(label, data);
-    toast(`تم تحميل ${label} — ${fmtNum(data.parcels.length)} قطعة`);
+    finishLoad(label, data);
   } catch (err) {
     console.error(err);
     toast(`تعذّر التحميل: ${err.message || 'خطأ غير معروف'}`, 5200);
@@ -280,48 +288,91 @@ async function loadArea(query, label) {
   }
 }
 
-async function loadPrebuilt(file) {
-  const res = await fetch(file, { cache: 'no-cache' });
-  if (!res.ok) return null;
-  const fc = await res.json();
+async function loadFromFile(file) {
+  if (state.busy) return toast('جارٍ التحميل، لحظة…');
+  state.busy = true;
+  showProgress('قراءة الملف المرفوع', 10);
+  try {
+    const text = await file.text();
+    await tick();
+    const fc = JSON.parse(text);
+    const label = file.name.replace(/\.(geojson|json)$/i, '');
+    setProgress(50, 'تجهيز البيانات');
+    await tick();
+    const data = parsePrebuilt(fc, 'ملف مرفوع من المستخدم');
+    finishLoad(label, data);
+  } catch (err) {
+    console.error(err);
+    toast(`الملف غير صالح: ${err.message}`, 5200);
+  } finally {
+    state.busy = false;
+    hideProgress();
+  }
+}
+
+function finishLoad(label, data) {
+  setProgress(96, 'رسم البلوكات');
+  applyArea(label, data);
+  if (!state.area.parcels.length) {
+    toast('لم تُوجد بيانات قطع لهذه المنطقة. جرّب منطقة أخرى أو ملفًا آخر', 5200);
+  } else {
+    toast(`تم تحميل ${label} — ${fmtNum(state.area.parcels.length)} قطعة`);
+  }
+}
+
+async function loadPrebuiltUrl(file) {
+  try {
+    setProgress(8, 'البحث عن الملف المحلي');
+    const res = await fetch(file, { cache: 'no-cache' });
+    if (!res.ok) return null;
+    setProgress(20, 'قراءة الملف المحلي');
+    const fc = await res.json();
+    await tick();
+    return parsePrebuilt(fc, 'بيانات محلية مُجهّزة مسبقًا');
+  } catch (_) {
+    return null;
+  }
+}
+
+function parsePrebuilt(fc, sourceNote) {
   const feats = fc.features || [];
   const bf = feats.find((f) => f.properties?.kind === 'boundary');
-  if (!bf) return null;
+  if (!bf) throw new Error('الملف لا يحتوي على حدود المنطقة (kind: boundary)');
 
-  setProgress(30, 'قراءة الملف المُجهّز');
-  await tick();
   const boundary = turf.feature(bf.geometry, { name: 'boundary' });
   const streets = feats
-    .filter((f) => f.properties?.kind === 'street')
+    .filter((f) => f.properties?.kind === 'street' && f.geometry?.type === 'LineString')
     .map((f) => turf.feature(f.geometry, { name: f.properties.name, highway: f.properties.highway }));
-  const raw = feats
-    .filter((f) => f.properties?.kind === 'parcel' && f.geometry?.type === 'Polygon')
-    .map((f) => {
-      const c = turf.centroid(f).geometry.coordinates;
-      return {
-        ring: f.geometry.coordinates[0], lng: c[0], lat: c[1],
-        house: f.properties.house ?? '', street: f.properties.street ?? '', source: 'osm',
-      };
-    });
 
-  setProgress(55, 'توليد البيانات الناقصة');
-  await tick();
-  return finalizeData(raw, streets, boundary, 'بيانات مُجهّزة مسبقًا من OpenStreetMap');
+  const raw = [];
+  for (const f of feats) {
+    if (f.properties?.kind !== 'parcel' || !f.geometry) continue;
+    const g = f.geometry.type === 'Polygon' ? f.geometry.coordinates
+      : f.geometry.type === 'MultiPolygon' ? f.geometry.coordinates[0] : null;
+    if (!g) continue;
+    const c = turf.centroid(turf.polygon(g)).geometry.coordinates;
+    raw.push({
+      ring: g[0], lng: c[0], lat: c[1],
+      house: f.properties.house ?? '', street: f.properties.street ?? '', source: 'osm',
+    });
+  }
+
+  return finalizeData(raw, streets, boundary, sourceNote);
 }
 
 async function loadFromNetwork(query) {
-  setProgress(8, 'البحث عن الحدود الإدارية');
+  setProgress(6, 'البحث عن الحدود الإدارية');
   const place = await geocode(query);
   const boundary = placeToBoundary(place);
 
-  setProgress(22, 'جلب الشوارع والمباني من OpenStreetMap');
+  setProgress(18, 'جلب الشوارع والمباني (داخل الحدود)');
   const osm = await fetchOverpass(boundary);
 
-  setProgress(55, 'تحليل الشبكة');
+  setProgress(62, 'تحليل الشبكة');
   await tick();
   const parsed = parseOSM(osm, boundary);
 
-  setProgress(70, 'توليد القطع الناقصة بذكاء');
+  setProgress(72, 'توليد القطع الناقصة');
   await tick();
   return finalizeData(parsed.rawParcels, parsed.streets, boundary,
     'بيانات OpenStreetMap مع استكمال مكاني للقطع الناقصة');
@@ -342,54 +393,105 @@ function placeToBoundary(place) {
   if (g && (g.type === 'Polygon' || g.type === 'MultiPolygon')) {
     return turf.feature(g, { name: place.display_name });
   }
-  // لا يوجد مضلع إداري: نستخدم مربعًا بمساحة 3 كم حول المركز
   const lat = +place.lat;
   const lon = +place.lon;
   return turf.buffer(turf.point([lon, lat]), 1.5, { units: 'kilometers' });
 }
 
-async function fetchOverpass(boundary) {
-  const [w, s, e, n] = turf.bbox(boundary);
-  const bbox = `${s},${w},${n},${e}`;
-  const cacheKey = `gis-osm:${hashStr(bbox)}`;
+/** يحوّل حدود المنطقة إلى سلسلة poly لـ Overpass (مبسّطة لتقليل الحجم) */
+function polyFilterOf(boundary) {
+  const geom = boundary.geometry;
+  const polys = geom.type === 'Polygon' ? [geom.coordinates] : geom.coordinates;
+  let best = polys[0];
+  let bestA = -1;
+  for (const p of polys) {
+    const a = Math.abs(turf.area(turf.polygon(p)));
+    if (a > bestA) { bestA = a; best = p; }
+  }
 
-  try {
-    const cached = localStorage.getItem(cacheKey);
-    if (cached) return JSON.parse(cached);
-  } catch (_) { /* التخزين المحلي غير متاح */ }
+  let tol = CONFIG.polySimplifyTolerance;
+  let coords = [];
+  for (let i = 0; i < 10; i++) {
+    const simp = turf.simplify(turf.polygon(best), { tolerance: tol, highQuality: false });
+    coords = turf.coordAll(simp);
+    if (coords.length <= CONFIG.polyMaxPoints) break;
+    tol *= 1.6;
+  }
+  return coords.map((c) => `${c[1].toFixed(5)} ${c[0].toFixed(5)}`).join(' ');
+}
 
-  const query = `[out:json][timeout:90];
-(
-  way["highway"~"^(motorway|trunk|primary|secondary|tertiary|unclassified|residential|living_street|service|road)$"](${bbox});
-  way["building"](${bbox});
-  way["addr:housenumber"](${bbox});
-  node["addr:housenumber"](${bbox});
-);
-out geom;`;
-
-  let lastErr = null;
-  for (const endpoint of CONFIG.overpassEndpoints) {
+async function runOverpassQuery(query) {
+  const attempt = async (endpoint) => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), CONFIG.overpassTimeoutMs);
     try {
       const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: 'data=' + encodeURIComponent(query),
+        signal: ctrl.signal,
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const json = await res.json();
-      try {
-        const str = JSON.stringify(json);
-        if (str.length < CONFIG.cacheLimitChars) localStorage.setItem(cacheKey, str);
-      } catch (_) { /* تجاوز التخزين عند امتلائه */ }
-      return json;
-    } catch (err) {
-      lastErr = err;
+      return await res.json();
+    } finally {
+      clearTimeout(timer);
     }
-  }
-  throw new Error(`تعذّر الاتصال بـ Overpass API (${lastErr?.message || 'لا استجابة'})`);
+  };
+  // نجرب السيرفرين في نفس الوقت ونأخذ أسرعهم
+  return Promise.any(CONFIG.overpassEndpoints.map(attempt));
 }
 
-/* ---------- Parse OSM into streets + raw parcels ---------- */
+async function cachedOverpass(query) {
+  const key = `gis-osm-v2:${hashStr(query)}`;
+  try {
+    const cached = localStorage.getItem(key);
+    if (cached) return JSON.parse(cached);
+  } catch (_) { /* لا يوجد تخزين محلي */ }
+
+  const json = await runOverpassQuery(query);
+  try {
+    const str = JSON.stringify(json);
+    if (str.length < CONFIG.cacheLimitChars) localStorage.setItem(key, str);
+  } catch (_) { /* امتلاء التخزين */ }
+  return json;
+}
+
+async function fetchOverpass(boundary) {
+  const poly = polyFilterOf(boundary);
+  const roadsQ = `[out:json][timeout:40];
+(
+  way["highway"~"^(motorway|trunk|primary|secondary|tertiary|unclassified|residential|living_street|service|road)$"](poly:"${poly}");
+  way["addr:housenumber"](poly:"${poly}");
+  node["addr:housenumber"](poly:"${poly}");
+);
+out geom qt;`;
+  const buildQ = `[out:json][timeout:40];
+(
+  way["building"](poly:"${poly}");
+);
+out geom qt;`;
+
+  setProgress(20, 'جلب الشوارع وأرقام البيوت');
+  let roads;
+  let bldg;
+  try {
+    [roads, bldg] = await Promise.all([
+      cachedOverpass(roadsQ).then((r) => { setProgress(42, 'تم جلب الشوارع'); return r; }),
+      cachedOverpass(buildQ).then((r) => { setProgress(52, 'تم جلب المباني'); return r; }),
+    ]);
+  } catch (err) {
+    throw new Error('تعذّر جلب البيانات من OpenStreetMap، حاول مرة أخرى أو ارفع ملف GeoJSON');
+  }
+
+  // دمج بدون تكرار (المبنى الذي له addr قد يظهر في الاستعلامين)
+  const seen = new Map();
+  for (const el of [...(roads.elements || []), ...(bldg.elements || [])]) {
+    seen.set(`${el.type}/${el.id}`, el);
+  }
+  return { elements: [...seen.values()] };
+}
+
+/* ---------- Parse OSM ---------- */
 function parseOSM(osm, boundary) {
   const streets = [];
   const buildings = [];
@@ -420,7 +522,6 @@ function parseOSM(osm, boundary) {
     try { return turf.booleanIntersects(s, boundary); } catch (_) { return false; }
   });
 
-  // ربط أرقام البيوت (nodes) بالمباني التي تحتويها
   const polys = [];
   for (const b of buildings) {
     try {
@@ -456,9 +557,7 @@ function parseOSM(osm, boundary) {
 }
 
 /* =========================================================================
-   2) Smart Fallback: توليد القطع الناقصة بشكل منطقي
-   - تُعيّن كل قطعة إلى شارع قريب، ورقم بيت متسلسل بالجانبين (زوجي/فردي)
-   - القطع المولّدة تُعلَّم صراحةً (synthetic) لتمييزها عن السجلات الرسمية
+   2) Smart Fallback: توليد القطع الناقصة
    ========================================================================= */
 function finalizeData(rawIn, streetsIn, boundary, baseNote) {
   const bb = turf.bbox(boundary);
@@ -564,12 +663,7 @@ function finalizeData(rawIn, streetsIn, boundary, baseNote) {
   const pct = parcels.length ? Math.round((synth.length / parcels.length) * 100) : 0;
   note += ` · مسجّلة: ${fmtNum(realOut.length)} · مقدّرة: ${fmtNum(synth.length)} (${pct}%)`;
 
-  return {
-    boundary,
-    streets: streetsIn,
-    parcels,
-    note,
-  };
+  return { boundary, streets: streetsIn, parcels, note };
 }
 
 function sampleStreets(lines, boundary, bb, spacing, offset) {
@@ -609,7 +703,6 @@ function virtualGrid(bb) {
   return lines;
 }
 
-/** مجزّئ مكاني خفيف (Spatial hash) لفحص التعارض بالمسافة بالمتر */
 function makeHash(cellM, refLat) {
   const kx = 111320 * Math.cos(refLat * Math.PI / 180);
   const ky = 111320;
@@ -641,7 +734,6 @@ function makeHash(cellM, refLat) {
   };
 }
 
-/** مستطيل (قطعة) مُحاذٍ لاتجاه الشارع */
 function rectAt(center, bearing, lenM, widM) {
   const hl = lenM / 2;
   const hw = widM / 2;
@@ -656,7 +748,7 @@ function rectAt(center, bearing, lenM, widM) {
 }
 
 /* =========================================================================
-   3) Dynamic block partitioning: K-Means + Voronoi مقصوص بحدود المنطقة
+   3) Block partitioning: K-Means + Voronoi مقصوص بحدود المنطقة
    ========================================================================= */
 function partitionBlocks(parcels, boundary, k, seed, colorSeed) {
   const rng = mulberry32(seed ^ 0x9e3779b9);
@@ -670,12 +762,10 @@ function partitionBlocks(parcels, boundary, k, seed, colorSeed) {
   }
   if (pts.length < k) throw new Error('المنطقة صغيرة جدًا لهذا العدد من البلوكات');
 
-  // تصحيح مقياس خط الطول بحسب خط العرض
   const n = pts.length;
   const xs = pts.map((p) => p[0] * cosLat);
   const ys = pts.map((p) => p[1]);
 
-  // K-Means++ initialisation
   const cx = [];
   const cy = [];
   const first = Math.floor(rng() * n);
@@ -703,7 +793,6 @@ function partitionBlocks(parcels, boundary, k, seed, colorSeed) {
     cy.push(ys[pick]);
   }
 
-  // Lloyd iterations
   const assign = new Int32Array(n).fill(-1);
   for (let it = 0; it < 40; it++) {
     let moved = 0;
@@ -741,7 +830,6 @@ function partitionBlocks(parcels, boundary, k, seed, colorSeed) {
   }
   const sites = cx.map((x, c) => [x / cosLat, cy[c]]);
 
-  // Voronoi clipped to the boundary
   const pad = 0.01;
   const vbox = [bb[0] - pad, bb[1] - pad, bb[2] + pad, bb[3] + pad];
   const vor = turf.voronoi(turf.featureCollection(sites.map((s) => turf.point(s))), { bbox: vbox });
@@ -756,7 +844,6 @@ function partitionBlocks(parcels, boundary, k, seed, colorSeed) {
     if (clipped) raw.push({ site: s, feature: clipped });
   }
 
-  // ترقيم منطقي من الشمال للجنوب ومن الغرب للشرق (بنظام الصف المتعرج)
   const width = turf.distance([bb[0], bb[1]], [bb[2], bb[1]], { units: 'meters' });
   const height = turf.distance([bb[0], bb[1]], [bb[0], bb[3]], { units: 'meters' });
   const aspect = Math.max(width, 1) / Math.max(height, 1);
@@ -808,7 +895,6 @@ function assignParcels(parcels, blocks) {
     hit.parcels.push(p);
   }
 
-  // لا يُترك أي بلوك فارغ: نأخذ أقرب القطع من البلوكات الكبيرة
   for (const b of blocks) {
     if (b.parcels.length) continue;
     const near = parcels
@@ -869,14 +955,25 @@ function applyArea(label, data) {
   };
 
   $('activeAreaLabel').textContent = label;
-  state.map.fitBounds(L.geoJSON(data.boundary).getBounds(), { padding: [40, 40], maxZoom: 16 });
   rebuildBlocks();
   ['exportBlockBtn', 'exportFullBtn', 'exportBatchBtn'].forEach((id) => { $(id).disabled = false; });
+
+  state.map.invalidateSize();
+  if (state.blocks.length) {
+    state.map.fitBounds(L.geoJSON(data.boundary).getBounds(), { padding: [40, 40], maxZoom: 16 });
+  }
 }
 
 function rebuildBlocks() {
   const a = state.area;
   if (!a) return;
+  if (!a.parcels.length) {
+    state.blocks = [];
+    state.blockByNum = new Map();
+    render();
+    updateStats();
+    return;
+  }
   try {
     state.blocks = partitionBlocks(a.parcels, a.boundary, state.blockCount, a.seed, state.colorSeed);
   } catch (err) {
@@ -1230,7 +1327,7 @@ function flyToStreet(name) {
 }
 
 /* =========================================================================
-   7) Export bridge (exporter.js)
+   7) Export bridge
    ========================================================================= */
 function currentBasemap() {
   const mode = state.layerMode;
@@ -1257,7 +1354,7 @@ function exportContext() {
 }
 
 function requireArea() {
-  if (!state.area) { toast('حمّل منطقة أولاً'); return false; }
+  if (!state.area || !state.blocks.length) { toast('حمّل منطقة فيها بيانات أولاً'); return false; }
   return true;
 }
 
@@ -1270,7 +1367,7 @@ async function exportBlock(block) {
   const width = +$('exportPreset').value;
   const format = $('exportFormat').value;
 
-  focusBlock(block);          // Auto-Zoom للمستخدم على الشاشة
+  focusBlock(block);
   await waitFor(900);
 
   showProgress(`تصدير البلوك #${pad2(block.number)}`, 2);
