@@ -1,6 +1,8 @@
-name: Fetch Egypt GIS data
+name: Fetch Egypt GIS data and render blocks
 
-# يشغّل السكريبت من زر في GitHub ثم يحفظ الملف داخل الريبو تلقائياً
+# يشغّل السكريبت من زر في GitHub، ثم:
+#  1) يحفظ ملف GeoJSON داخل الريبو (لعرض الموقع)
+#  2) يرسم صورة PNG لكل بلوك ويجمعها في ZIP تنزّله من صفحة التشغيل
 on:
   workflow_dispatch:
     inputs:
@@ -10,9 +12,14 @@ on:
         default: 'المرج، القاهرة، مصر'
         type: string
       output:
-        description: 'مسار ملف الإخراج'
+        description: 'مسار ملف GeoJSON'
         required: true
         default: 'data/marg-cairo.geojson'
+        type: string
+      blocks:
+        description: 'عدد البلوكات (35 أو 53 أو أي رقم)'
+        required: true
+        default: '35'
         type: string
 
 permissions:
@@ -21,7 +28,7 @@ permissions:
 jobs:
   fetch:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -32,13 +39,29 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install requests shapely
+        run: pip install requests shapely numpy matplotlib arabic-reshaper
 
       - name: Fetch data from OpenStreetMap
         env:
           QUERY: ${{ inputs.query }}
           OUTPUT: ${{ inputs.output }}
         run: python fetch_egypt_gis.py --query "$QUERY" --out "$OUTPUT"
+
+      - name: Render block images (ZIP)
+        env:
+          OUTPUT: ${{ inputs.output }}
+          BLOCKS: ${{ inputs.blocks }}
+          QUERY: ${{ inputs.query }}
+        run: |
+          python render_blocks.py --geojson "$OUTPUT" --blocks "$BLOCKS" \
+            --out out/blocks --dpi 200 --size-in 12 --name "$QUERY"
+
+      - name: Upload block images as downloadable ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: blocks-images
+          path: out/blocks.zip
+          retention-days: 30
 
       - name: Commit the GeoJSON file
         env:
