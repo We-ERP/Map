@@ -46,7 +46,7 @@ OVERPASS_ENDPOINTS = [
     "https://overpass.kumi.systems/api/interpreter",
 ]
 HEADERS = {
-    "User-Agent": "egypt-gis-blocks/1.0 (educational project; contact: your-email@example.com)",
+    "User-Agent": "egypt-gis-blocks/1.0 (educational project; contact: seifroony@gmail.com)",
     "Accept-Language": "ar,en;q=0.8",
 }
 HIGHWAY_TYPES = (
