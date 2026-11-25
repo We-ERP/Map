@@ -250,6 +250,9 @@ function bindUI() {
   $('exportBlockBtn').addEventListener('click', () => exportBlock(state.selectedBlock));
   $('exportFullBtn').addEventListener('click', exportFull);
   $('exportBatchBtn').addEventListener('click', exportBatch);
+  $('exportExcelBlockBtn').addEventListener('click', () => exportBlockExcel(state.selectedBlock));
+  $('exportExcelAreaBtn').addEventListener('click', exportAreaExcel);
+  $('inspExcel').addEventListener('click', () => exportBlockExcel(state.selectedBlock));
 
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeInspector(); });
 }
@@ -962,7 +965,7 @@ function applyArea(label, data) {
 
   $('activeAreaLabel').textContent = label;
   rebuildBlocks();
-  ['exportBlockBtn', 'exportFullBtn', 'exportBatchBtn'].forEach((id) => { $(id).disabled = false; });
+  ['exportBlockBtn', 'exportFullBtn', 'exportBatchBtn', 'exportExcelBlockBtn', 'exportExcelAreaBtn'].forEach((id) => { $(id).disabled = false; });
 
   state.map.invalidateSize();
   if (state.blocks.length) {
@@ -1226,6 +1229,7 @@ function openInspector(kicker, title, html) {
   const hasBlock = !!state.selectedBlock;
   $('inspExport').disabled = !hasBlock;
   $('inspZoom').disabled = !hasBlock;
+  $('inspExcel').disabled = !hasBlock;
 }
 
 function closeInspector() {
@@ -1422,6 +1426,29 @@ async function exportBatch() {
     toast(`فشل التصدير: ${err.message}`, 5200);
   } finally {
     hideProgress();
+  }
+}
+
+function exportBlockExcel(block) {
+  if (!requireArea()) return;
+  if (!block) return toast('اختر بلوكًا أولاً من الخريطة');
+  try {
+    BlockExcel.exportBlock(state.area.label, block);
+    toast('تم تصدير ملف Excel للبلوك');
+  } catch (err) {
+    console.error(err);
+    toast(`فشل تصدير Excel: ${err.message}`, 5200);
+  }
+}
+
+function exportAreaExcel() {
+  if (!requireArea()) return;
+  try {
+    BlockExcel.exportArea(state.area.label, state.blocks, state.area.parcels);
+    toast('تم تصدير ملف Excel للمنطقة');
+  } catch (err) {
+    console.error(err);
+    toast(`فشل تصدير Excel: ${err.message}`, 5200);
   }
 }
 

@@ -114,6 +114,8 @@
         <button class="btn btn-accent" id="exportBlockBtn" disabled>تصدير البلوك المحدد</button>
         <button class="btn" id="exportFullBtn" disabled>تصدير الخريطة كاملة</button>
         <button class="btn" id="exportBatchBtn" disabled>كل البلوكات (ZIP)</button>
+        <button class="btn" id="exportExcelBlockBtn" disabled>Excel: البلوك المحدد</button>
+        <button class="btn" id="exportExcelAreaBtn" disabled>Excel: المنطقة كاملة</button>
       </div>
       <div class="field-row">
         <label for="exportPreset">جودة الصورة</label>
@@ -169,6 +171,7 @@
     <div class="inspector-body" id="inspBody"></div>
     <div class="inspector-foot">
       <button class="btn btn-accent" id="inspExport">تصدير هذا البلوك</button>
+      <button class="btn" id="inspExcel" disabled>Excel</button>
       <button class="btn btn-ghost" id="inspZoom">تكبير عليه</button>
     </div>
   </aside>
@@ -188,7 +191,9 @@
   <script src="https://cdn.jsdelivr.net/npm/@turf/turf@7.1.0/turf.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <script src="exporter.js"></script>
+  <script src="excel.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

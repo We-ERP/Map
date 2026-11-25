@@ -13,8 +13,8 @@
 
   /* ---- إعدادات قابلة للتعديل ---- */
   const CONFIG = {
-    FULL_SHOW_BLOCK_LINES: false,   // إظهار حدود البلوكات داخل الخريطة الكاملة المفصّلة
-    FULL_SHOW_PARCELS: false,       // إظهار حدود القطع داخل الخريطة الكاملة (الأرقام تظهر دائماً)
+    FULL_SHOW_BLOCK_LINES: true,   // إظهار حدود البلوكات داخل الخريطة الكاملة المفصّلة
+    FULL_SHOW_PARCELS: true,       // إظهار حدود القطع داخل الخريطة الكاملة (الأرقام تظهر دائماً)
     FULL_STREET_LABEL_MAX: 3000,    // أقصى عدد لأسماء الشوارع في الخريطة الكاملة
     BLOCK_STREET_LABEL_MAX: 120,    // أقصى عدد لأسماء الشوارع في تصدير البلوك
   };
@@ -24,6 +24,12 @@
   const EARTH_R = 6378137;
   const TILE_M_PER_PX_Z0 = 156543.03392;
   const PRINT_DPI = 300;
+
+  const STREET_COLORS = {
+    dark: { motorway: '#E8A33D', trunk: '#E8A33D', primary: '#F2C46D', secondary: '#9FD8CF', tertiary: '#7FB3D5', residential: '#F7F3EA', unclassified: '#C9D1D9', living_street: '#C9D1D9', service: '#6B7A88' },
+    light: { motorway: '#B9761A', trunk: '#B9761A', primary: '#C98A2E', secondary: '#1F7D72', tertiary: '#2F6F9A', residential: '#0E1A24', unclassified: '#4A5968', living_street: '#4A5968', service: '#8A96A3' },
+  };
+  const streetColorOf = (h, dark) => (dark ? STREET_COLORS.dark : STREET_COLORS.light)[h] || (dark ? '#F7F3EA' : '#0E1A24');
 
   const PALETTE = {
     dark: {
@@ -245,14 +251,15 @@
 
   function presetOptions(style, ctx, format) {
     if (style === 'outline') {
+      // البلوك وحده بتفاصيله (شوارع + قطع + أرقام) مقصوصة داخل حدوده، على خلفية شفافة
       return {
         dark: false,
-        background: format === 'png' ? null : '#FFFFFF',   // PNG شفاف، JPEG بخلفية بيضاء
+        background: format === 'png' ? null : '#FFFFFF',
         useBasemap: false,
-        blockFill: true, fillAlpha: 0, selAlpha: 0.22, otherAlpha: 0,
-        blockLines: true, onlySelected: true,
-        showAreaBoundary: false, showParcels: false, showStreets: false,
-        streetLabels: 'none', showHouses: 'none', blockLabels: 'selected',
+        blockFill: true, fillAlpha: 0, selAlpha: 0.10, otherAlpha: 0,
+        blockLines: true, onlySelected: true, clipToBlock: true,
+        showAreaBoundary: false, showParcels: true, showStreets: true,
+        streetLabels: 'all', showHouses: 'selected', blockLabels: 'selected',
         showHeader: false, showFooter: false,
       };
     }
@@ -260,16 +267,18 @@
       return {
         dark: ctx.dark, background: bgOf(ctx), useBasemap: true,
         blockFill: true, fillAlpha: 0.24, selAlpha: 0.40, otherAlpha: 0.08,
-        blockLines: true, onlySelected: false,
+        blockLines: true, onlySelected: false, clipToBlock: false,
         showAreaBoundary: false, showParcels: true, showStreets: true,
         streetLabels: 'all', showHouses: 'selected', blockLabels: 'all',
         showHeader: true, showFooter: true,
       };
     }
     if (style === 'detailed') {
+      // الخريطة الكاملة ملونة: البلوكات بألوان خفيفة، والقطع بالتركواز، والشوارع حسب نوعها
       return {
         dark: ctx.dark, background: bgOf(ctx), useBasemap: false,
-        blockFill: false, blockLines: CONFIG.FULL_SHOW_BLOCK_LINES, onlySelected: false,
+        blockFill: true, fillAlpha: 0.07, selAlpha: 0.07, otherAlpha: 0.07,
+        blockLines: CONFIG.FULL_SHOW_BLOCK_LINES, onlySelected: false, clipToBlock: false,
         showAreaBoundary: true, showParcels: CONFIG.FULL_SHOW_PARCELS, showStreets: true,
         streetLabels: 'all', showHouses: 'all',
         blockLabels: CONFIG.FULL_SHOW_BLOCK_LINES ? 'all' : 'none',
@@ -279,7 +288,7 @@
     // boundary: حدود المنطقة فقط
     return {
       dark: ctx.dark, background: bgOf(ctx), useBasemap: false,
-      blockFill: false, blockLines: false, onlySelected: false,
+      blockFill: false, blockLines: false, onlySelected: false, clipToBlock: false,
       showAreaBoundary: true, showParcels: false, showStreets: false,
       streetLabels: 'none', showHouses: 'none', blockLabels: 'none',
       showHeader: true, showFooter: true,
@@ -342,10 +351,19 @@
       }
     }
 
+    const clipOn = !!(o.clipToBlock && sel);
+    if (clipOn) {
+      g.save();
+      g.beginPath();
+      tracePolygon(g, sel.feature.geometry, L);
+      g.clip();
+    }
+
     // 3) القطع
     if (o.showParcels) {
       o.onProgress?.(45, 'رسم القطع');
       for (const p of ctx.parcels) {
+        if (o.onlySelected && sel && p.block !== sel.number) continue;
         const inSel = sel ? p.block === sel.number : true;
         g.beginPath();
         tracePolygon(g, p.geometry, L);
@@ -374,7 +392,7 @@
       for (const s of ctx.streets) {
         g.beginPath();
         tracePath(g, s.geometry.coordinates, L);
-        g.strokeStyle = streetFill;
+        g.strokeStyle = plain ? streetColorOf(s.properties.highway, o.dark) : streetFill;
         g.lineWidth = streetWidth(s.properties.highway) * u;
         g.stroke();
       }
@@ -429,6 +447,8 @@
         });
       }
     }
+
+    if (clipOn) g.restore();
 
     // 7) شارات البلوكات
     if (o.blockLabels !== 'none') {
