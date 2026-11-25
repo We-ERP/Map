@@ -130,6 +130,20 @@
           <option value="jpeg">JPEG</option>
         </select>
       </div>
+      <div class="field-row">
+        <label for="blockExportStyle">شكل البلوك</label>
+        <select id="blockExportStyle" class="input">
+          <option value="context" selected>مع الخريطة والشوارع والقطع</option>
+          <option value="outline">حدود البلوك فقط (PNG شفاف)</option>
+        </select>
+      </div>
+      <div class="field-row">
+        <label for="fullExportStyle">شكل الخريطة الكاملة</label>
+        <select id="fullExportStyle" class="input">
+          <option value="detailed" selected>حدود + شوارع + أرقام البيوت</option>
+          <option value="boundary">حدود المنطقة فقط</option>
+        </select>
+      </div>
     </section>
 
     <section class="card stats-card" id="statsCard">

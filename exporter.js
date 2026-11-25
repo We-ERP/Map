@@ -1,15 +1,25 @@
 /* =========================================================================
-   exporter.js — محرك التصدير عالي الدقة
-   - يرسم المشهد مباشرة على Canvas من الإحداثيات الهندسية (Web Mercator)
-     بدلاً من لقطة للشاشة، لذلك لا يوجد قص أو تشويش مهما كان الحجم.
-   - خلفية الأقمار/الشوارع تُضاف عند توفرها (CORS)، وإلا تُرسم على خلفية موحدة.
-   - PNG مع بيانات DPI = 300 لتطابق الطباعة، و JPEG عند الطلب.
-   - أوضاع: بلوك واحد، خريطة كاملة، وكل البلوكات كملف ZIP.
+   exporter.js — محرك التصدير عالي الدقة (نسخة 2)
+   أنماط التصدير:
+     البلوك:    context  = البلوك مع الخريطة والشوارع والقطع والأرقام
+                outline  = حدود البلوك فقط (PNG شفاف، بدون أي خريطة)
+     الكاملة:   detailed = حدود المنطقة + أسماء الشوارع + أرقام البيوت (بدون خريطة)
+                boundary = حدود المنطقة فقط
+   الرسم يتم على Canvas من الإحداثيات الهندسية (Web Mercator)، فالحدود والحروف
+   تبقى حادة مهما كبر المقاس.
    ========================================================================= */
 (function (global) {
   'use strict';
 
-  const REF_WIDTH = 4000;          // كل المقاسات تُحسب نسبةً لهذا العرض
+  /* ---- إعدادات قابلة للتعديل ---- */
+  const CONFIG = {
+    FULL_SHOW_BLOCK_LINES: false,   // إظهار حدود البلوكات داخل الخريطة الكاملة المفصّلة
+    FULL_SHOW_PARCELS: false,       // إظهار حدود القطع داخل الخريطة الكاملة (الأرقام تظهر دائماً)
+    FULL_STREET_LABEL_MAX: 3000,    // أقصى عدد لأسماء الشوارع في الخريطة الكاملة
+    BLOCK_STREET_LABEL_MAX: 120,    // أقصى عدد لأسماء الشوارع في تصدير البلوك
+  };
+
+  const REF_WIDTH = 4000;
   const HALF_WORLD = 20037508.342789244;
   const EARTH_R = 6378137;
   const TILE_M_PER_PX_Z0 = 156543.03392;
@@ -45,23 +55,21 @@
     return { minX: mercX(bb[0]), minY: mercY(bb[1]), maxX: mercX(bb[2]), maxY: mercY(bb[3]) };
   }
 
-  /** تخطيط الصورة: رأسية (ترويسة + خريطة + تذييل) مع الحفاظ على نسب الخريطة */
-  function buildLayout(W, mb, { pad = 0.06, maxAspect = 1.6 } = {}) {
+  /** تخطيط الصورة. يمكن إلغاء الترويسة والتذييل للتصدير بالحدود فقط */
+  function buildLayout(W, mb, { pad = 0.06, maxAspect = 1.6, header = true, footer = true } = {}) {
     const margin = W * 0.03;
-    const headerH = W * 0.1;
-    const footerH = W * 0.05;
+    const headerH = header ? W * 0.1 : 0;
+    const footerH = footer ? W * 0.05 : 0;
 
-    const dx0 = mb.maxX - mb.minX;
-    const dy0 = mb.maxY - mb.minY;
-    const dx = dx0 * (1 + 2 * pad);
-    const dy = dy0 * (1 + 2 * pad);
+    const dx = (mb.maxX - mb.minX) * (1 + 2 * pad);
+    const dy = (mb.maxY - mb.minY) * (1 + 2 * pad);
     const cx = (mb.minX + mb.maxX) / 2;
     const cy = (mb.minY + mb.maxY) / 2;
     const bounds = { minX: cx - dx / 2, maxX: cx + dx / 2, minY: cy - dy / 2, maxY: cy + dy / 2 };
 
     const availW = W - 2 * margin;
     const availH = W * maxAspect;
-    const scale = Math.min(availW / dx, availH / dy);   // px لكل وحدة Mercator
+    const scale = Math.min(availW / dx, availH / dy);
     const mapW = dx * scale;
     const mapH = dy * scale;
     const mapX0 = (W - mapW) / 2;
@@ -74,7 +82,7 @@
     return {
       W, H, margin, headerH, footerH, bounds, scale,
       mapX0, mapY0, mapW, mapH,
-      pxPerMeter: scale / cosLat0,          // مقياس حقيقي بالمتر تقريبًا
+      pxPerMeter: scale / cosLat0,
       toPx,
       project: (lng, lat) => toPx(mercX(lng), mercY(lat)),
     };
@@ -153,14 +161,14 @@
     g.restore();
   }
 
-  /* ---------- Fonts & tiles ---------- */
+  /* ---------- Fonts & basemap tiles ---------- */
   async function ensureFonts() {
     try {
       await Promise.all([
         document.fonts.load('800 64px Cairo'),
         document.fonts.load('600 32px Cairo'),
       ]);
-    } catch (_) { /* سيُستخدم الخط الاحتياطي */ }
+    } catch (_) { /* خط احتياطي */ }
   }
 
   function loadTile(url, timeoutMs = 9000) {
@@ -174,7 +182,6 @@
     });
   }
 
-  /** يرسم قوالب الخلفية (tiles) بدقة الزوم المناسبة للحجم المطلوب */
   async function drawBasemap(g, L, templates, dark, onProgress) {
     const tileM = (z) => (2 * HALF_WORLD) / Math.pow(2, z);
     const rangeFor = (z) => {
@@ -227,200 +234,303 @@
     return loaded;
   }
 
-  /* ---------- Scene ---------- */
   function streetWidth(h) {
     return { motorway: 16, trunk: 16, primary: 14, secondary: 11, tertiary: 9, residential: 6, unclassified: 6, living_street: 5, service: 4 }[h] || 6;
   }
 
+  /* ---------- Presets: each export style is a set of switches ---------- */
+  function bgOf(ctx) {
+    return (ctx.dark ? PALETTE.dark : PALETTE.light).bg;
+  }
+
+  function presetOptions(style, ctx, format) {
+    if (style === 'outline') {
+      return {
+        dark: false,
+        background: format === 'png' ? null : '#FFFFFF',   // PNG شفاف، JPEG بخلفية بيضاء
+        useBasemap: false,
+        blockFill: true, fillAlpha: 0, selAlpha: 0.22, otherAlpha: 0,
+        blockLines: true, onlySelected: true,
+        showAreaBoundary: false, showParcels: false, showStreets: false,
+        streetLabels: 'none', showHouses: 'none', blockLabels: 'selected',
+        showHeader: false, showFooter: false,
+      };
+    }
+    if (style === 'context') {
+      return {
+        dark: ctx.dark, background: bgOf(ctx), useBasemap: true,
+        blockFill: true, fillAlpha: 0.24, selAlpha: 0.40, otherAlpha: 0.08,
+        blockLines: true, onlySelected: false,
+        showAreaBoundary: false, showParcels: true, showStreets: true,
+        streetLabels: 'all', showHouses: 'selected', blockLabels: 'all',
+        showHeader: true, showFooter: true,
+      };
+    }
+    if (style === 'detailed') {
+      return {
+        dark: ctx.dark, background: bgOf(ctx), useBasemap: false,
+        blockFill: false, blockLines: CONFIG.FULL_SHOW_BLOCK_LINES, onlySelected: false,
+        showAreaBoundary: true, showParcels: CONFIG.FULL_SHOW_PARCELS, showStreets: true,
+        streetLabels: 'all', showHouses: 'all',
+        blockLabels: CONFIG.FULL_SHOW_BLOCK_LINES ? 'all' : 'none',
+        showHeader: true, showFooter: true,
+      };
+    }
+    // boundary: حدود المنطقة فقط
+    return {
+      dark: ctx.dark, background: bgOf(ctx), useBasemap: false,
+      blockFill: false, blockLines: false, onlySelected: false,
+      showAreaBoundary: true, showParcels: false, showStreets: false,
+      streetLabels: 'none', showHouses: 'none', blockLabels: 'none',
+      showHeader: true, showFooter: true,
+    };
+  }
+
+  /* ---------- Scene ---------- */
   async function drawScene(ctx, L, o) {
     await ensureFonts();
     const pal = o.dark ? PALETTE.dark : PALETTE.light;
     const u = unitOf(L.W);
     const sel = o.block || null;
+    const plain = !o.useBasemap;
+    const teal = pal.teal;
+    const streetFill = plain ? pal.text : pal.street;
+    const streetCase = plain ? pal.bg : pal.streetCasing;
 
     const canvas = document.createElement('canvas');
     canvas.width = L.W;
     canvas.height = L.H;
     const g = canvas.getContext('2d');
 
-    g.fillStyle = pal.bg;
-    g.fillRect(0, 0, L.W, L.H);
+    if (o.background) {
+      g.fillStyle = o.background;
+      g.fillRect(0, 0, L.W, L.H);
+    }
 
-    // 1) خلفية الخريطة
-    if (ctx.basemap && ctx.basemap.length) {
+    if (o.useBasemap && ctx.basemap && ctx.basemap.length) {
       await drawBasemap(g, L, ctx.basemap, o.dark, o.onProgress);
+    }
+
+    // 1) حدود المنطقة
+    if (o.showAreaBoundary) {
+      g.beginPath();
+      tracePolygon(g, ctx.boundary.geometry, L);
+      g.lineJoin = 'round';
+      g.strokeStyle = pal.amber;
+      g.lineWidth = 7 * u;
+      g.stroke();
     }
 
     // 2) البلوكات
     o.onProgress?.(35, 'رسم البلوكات');
     for (const b of ctx.blocks) {
       if (!b.feature) continue;
-      const isSel = sel && b.number === sel.number;
+      const isSel = !!sel && b.number === sel.number;
+      if (o.onlySelected && !isSel) continue;
+      if (!o.blockFill && !o.blockLines && !isSel) continue;
       g.beginPath();
       tracePolygon(g, b.feature.geometry, L);
-      const a = isSel ? 0.40 : sel ? 0.08 : 0.24;
-      g.fillStyle = `hsla(${b.hue}, 72%, 58%, ${a})`;
-      g.fill('evenodd');
-      g.strokeStyle = `hsl(${b.hue}, 80%, ${o.dark ? 72 : 38}%)`;
-      g.lineWidth = (isSel ? 7 : 3) * u;
-      g.stroke();
+      if (o.blockFill) {
+        const a = isSel ? o.selAlpha : sel ? o.otherAlpha : o.fillAlpha;
+        g.fillStyle = `hsla(${b.hue}, 72%, 58%, ${a})`;
+        g.fill('evenodd');
+      }
+      if (o.blockLines || isSel) {
+        g.strokeStyle = `hsl(${b.hue}, 80%, ${o.dark ? 72 : 38}%)`;
+        g.lineWidth = (isSel ? 7 : 3) * u;
+        g.stroke();
+      }
     }
 
-    // 3) القطع (المتقطعة = مقدّرة)
-    o.onProgress?.(45, 'رسم القطع');
-    const teal = pal.teal;
-    for (const p of ctx.parcels) {
-      const inSel = sel ? p.block === sel.number : true;
-      g.beginPath();
-      tracePolygon(g, p.geometry, L);
-      g.fillStyle = `rgba(${teal}, ${inSel ? 0.20 : 0.06})`;
-      g.fill('evenodd');
-      g.setLineDash(p.source === 'synthetic' ? [5 * u, 4 * u] : []);
-      g.lineWidth = (inSel ? 1.8 : 1) * u;
-      g.strokeStyle = `rgba(${teal}, ${inSel ? 0.95 : 0.25})`;
-      g.stroke();
-    }
-    g.setLineDash([]);
-
-    // 4) الشوارع (طبقة الظل ثم الطبقة الفاتحة)
-    o.onProgress?.(55, 'رسم الشوارع');
-    g.lineCap = 'round';
-    g.lineJoin = 'round';
-    for (const s of ctx.streets) {
-      g.beginPath();
-      tracePath(g, s.geometry.coordinates, L);
-      g.strokeStyle = pal.streetCasing;
-      g.lineWidth = streetWidth(s.properties.highway) * u + 2.5 * u;
-      g.stroke();
-    }
-    for (const s of ctx.streets) {
-      g.beginPath();
-      tracePath(g, s.geometry.coordinates, L);
-      g.strokeStyle = pal.street;
-      g.lineWidth = streetWidth(s.properties.highway) * u;
-      g.stroke();
-    }
-
-    // 5) أسماء الشوارع على الخط
-    o.onProgress?.(65, 'كتابة أسماء الشوارع');
-    const majorOnly = o.mode === 'full';
-    const maxLabels = o.mode === 'block' ? 90 : 28;
-    let labelCount = 0;
-    const streetFont = `600 ${26 * u}px Cairo, sans-serif`;
-    g.font = streetFont;
-    for (const s of ctx.streets) {
-      if (labelCount >= maxLabels) break;
-      const h = s.properties.highway;
-      if (majorOnly && !['primary', 'secondary', 'trunk', 'motorway', 'tertiary'].includes(h)) continue;
-      const c = s.geometry.coordinates;
-      if (c.length < 2) continue;
-      const mid = Math.floor(c.length / 2);
-      const [mx, my] = L.project(c[mid][0], c[mid][1]);
-      if (mx < L.mapX0 || mx > L.mapX0 + L.mapW || my < L.mapY0 || my > L.mapY0 + L.mapH) continue;
-
-      const a = L.project(c[Math.max(0, mid - 1)][0], c[Math.max(0, mid - 1)][1]);
-      const b = L.project(c[Math.min(c.length - 1, mid + 1)][0], c[Math.min(c.length - 1, mid + 1)][1]);
-      const segLen = Math.hypot(b[0] - a[0], b[1] - a[1]);
-      const textW = g.measureText(s.properties.name).width;
-      if (segLen < textW * 1.1) continue;
-
-      let ang = Math.atan2(b[1] - a[1], b[0] - a[0]);
-      if (ang > Math.PI / 2) ang -= Math.PI;
-      if (ang < -Math.PI / 2) ang += Math.PI;
-
-      drawText(g, s.properties.name, mx, my, {
-        font: streetFont, fill: pal.text, halo: pal.halo, lineW: 6 * u, rotate: ang,
-      });
-      labelCount++;
-    }
-
-    // 6) أرقام البيوت (للبلوك المحدد فقط، بحجم يتناسب مع القطعة)
-    if (o.showHouses && sel) {
-      o.onProgress?.(75, 'كتابة أرقام البيوت');
+    // 3) القطع
+    if (o.showParcels) {
+      o.onProgress?.(45, 'رسم القطع');
       for (const p of ctx.parcels) {
-        if (p.block !== sel.number) continue;
+        const inSel = sel ? p.block === sel.number : true;
+        g.beginPath();
+        tracePolygon(g, p.geometry, L);
+        g.fillStyle = `rgba(${teal}, ${inSel ? 0.20 : 0.06})`;
+        g.fill('evenodd');
+        g.setLineDash(p.source === 'synthetic' ? [5 * u, 4 * u] : []);
+        g.lineWidth = (inSel ? 1.8 : 1) * u;
+        g.strokeStyle = `rgba(${teal}, ${inSel ? 0.95 : 0.25})`;
+        g.stroke();
+      }
+      g.setLineDash([]);
+    }
+
+    // 4) الشوارع
+    if (o.showStreets) {
+      o.onProgress?.(55, 'رسم الشوارع');
+      g.lineCap = 'round';
+      g.lineJoin = 'round';
+      for (const s of ctx.streets) {
+        g.beginPath();
+        tracePath(g, s.geometry.coordinates, L);
+        g.strokeStyle = streetCase;
+        g.lineWidth = streetWidth(s.properties.highway) * u + 2.5 * u;
+        g.stroke();
+      }
+      for (const s of ctx.streets) {
+        g.beginPath();
+        tracePath(g, s.geometry.coordinates, L);
+        g.strokeStyle = streetFill;
+        g.lineWidth = streetWidth(s.properties.highway) * u;
+        g.stroke();
+      }
+    }
+
+    // 5) أسماء الشوارع على خطوطها
+    if (o.showStreets && o.streetLabels === 'all') {
+      o.onProgress?.(65, 'كتابة أسماء الشوارع');
+      const font = `600 ${(plain ? 22 : 26) * u}px Cairo, sans-serif`;
+      const max = sel ? CONFIG.BLOCK_STREET_LABEL_MAX : CONFIG.FULL_STREET_LABEL_MAX;
+      g.font = font;
+      let count = 0;
+      for (const s of ctx.streets) {
+        if (count >= max) break;
+        const c = s.geometry.coordinates;
+        if (c.length < 2) continue;
+        const mid = Math.floor(c.length / 2);
+        const [mx, my] = L.project(c[mid][0], c[mid][1]);
+        if (mx < L.mapX0 || mx > L.mapX0 + L.mapW || my < L.mapY0 || my > L.mapY0 + L.mapH) continue;
+
+        const a = L.project(c[Math.max(0, mid - 1)][0], c[Math.max(0, mid - 1)][1]);
+        const b = L.project(c[Math.min(c.length - 1, mid + 1)][0], c[Math.min(c.length - 1, mid + 1)][1]);
+        const segLen = Math.hypot(b[0] - a[0], b[1] - a[1]);
+        const textW = g.measureText(s.properties.name).width;
+        if (segLen < textW * 1.1) continue;
+
+        let ang = Math.atan2(b[1] - a[1], b[0] - a[0]);
+        if (ang > Math.PI / 2) ang -= Math.PI;
+        if (ang < -Math.PI / 2) ang += Math.PI;
+
+        drawText(g, s.properties.name, mx, my, {
+          font, fill: pal.text, halo: pal.halo, lineW: 6 * u, rotate: ang,
+        });
+        count++;
+      }
+    }
+
+    // 6) أرقام البيوت
+    if (o.showHouses !== 'none') {
+      o.onProgress?.(75, 'كتابة أرقام البيوت');
+      const fill = plain ? pal.text : '#FFFFFF';
+      const halo = plain ? pal.bg : 'rgba(0,0,0,0.85)';
+      const minFs = (plain ? 9 : 12) * u;
+      const maxFs = (plain ? 26 : 34) * u;
+      for (const p of ctx.parcels) {
+        if (o.showHouses === 'selected' && (!sel || p.block !== sel.number)) continue;
         const [x, y] = L.project(p.lng, p.lat);
-        const fs = clamp(Math.sqrt(p.area) * L.pxPerMeter * 0.42, 12 * u, 34 * u);
+        if (x < L.mapX0 - 50 || x > L.mapX0 + L.mapW + 50 || y < L.mapY0 - 50 || y > L.mapY0 + L.mapH + 50) continue;
+        const fs = clamp(Math.sqrt(p.area) * L.pxPerMeter * 0.42, minFs, maxFs);
         drawText(g, String(p.house), x, y, {
-          font: `700 ${fs}px Cairo, sans-serif`, fill: '#FFFFFF',
-          halo: 'rgba(0,0,0,0.85)', lineW: fs * 0.22,
+          font: `700 ${fs}px Cairo, sans-serif`, fill, halo, lineW: fs * 0.18,
         });
       }
     }
 
     // 7) شارات البلوكات
-    o.onProgress?.(85, 'كتابة أرقام البلوكات');
-    for (const b of ctx.blocks) {
-      if (!b.feature) continue;
-      const [x, y] = L.project(b.labelLL[0], b.labelLL[1]);
-      const isSel = sel && b.number === sel.number;
-      const fs = (isSel ? 62 : sel ? 30 : 46) * u;
-      drawBadge(g, `بلوك #${pad2(b.number)}`, x, y, fs, {
-        bg: pal.badgeBg, fg: pal.text, amber: pal.amber, amberInk: pal.amberInk,
-        active: isSel, opacity: sel && !isSel ? 0.65 : 1,
-      });
+    if (o.blockLabels !== 'none') {
+      o.onProgress?.(85, 'كتابة أرقام البلوكات');
+      for (const b of ctx.blocks) {
+        if (!b.feature) continue;
+        const isSel = !!sel && b.number === sel.number;
+        if (o.blockLabels === 'selected' && !isSel) continue;
+        const [x, y] = L.project(b.labelLL[0], b.labelLL[1]);
+        const fs = (isSel ? 62 : sel ? 30 : 40) * u;
+        drawBadge(g, `بلوك #${pad2(b.number)}`, x, y, fs, {
+          bg: pal.badgeBg, fg: pal.text, amber: pal.amber, amberInk: pal.amberInk,
+          active: isSel, opacity: sel && !isSel ? 0.65 : 1,
+        });
+      }
     }
 
-    // 8) إطار الخريطة + الترويسة + المفتاح + التذييل
-    g.strokeStyle = pal.sub;
-    g.lineWidth = 2 * u;
-    g.strokeRect(L.mapX0, L.mapY0, L.mapW, L.mapH);
+    // 8) الترويسة والمفتاح والإطار
+    if (o.showHeader) {
+      g.strokeStyle = pal.sub;
+      g.lineWidth = 2 * u;
+      g.strokeRect(L.mapX0, L.mapY0, L.mapW, L.mapH);
 
-    g.fillStyle = pal.header;
-    g.fillRect(0, 0, L.W, L.headerH);
-    g.fillStyle = pal.amber;
-    g.fillRect(0, L.headerH - 4 * u, L.W, 4 * u);
+      g.fillStyle = pal.header;
+      g.fillRect(0, 0, L.W, L.headerH);
+      g.fillStyle = pal.amber;
+      g.fillRect(0, L.headerH - 4 * u, L.W, 4 * u);
 
-    g.textBaseline = 'middle';
-    g.textAlign = 'right';
-    g.fillStyle = pal.text;
-    g.font = `800 ${74 * u}px Cairo, sans-serif`;
-    g.fillText(o.title, L.W - L.margin, L.headerH * 0.36);
-    g.font = `600 ${38 * u}px Cairo, sans-serif`;
-    g.fillStyle = pal.sub;
-    g.fillText(o.subtitle, L.W - L.margin, L.headerH * 0.7);
+      g.textBaseline = 'middle';
+      g.textAlign = 'right';
+      g.fillStyle = pal.text;
+      g.font = `800 ${74 * u}px Cairo, sans-serif`;
+      g.fillText(o.title, L.W - L.margin, L.headerH * 0.36);
+      g.font = `600 ${38 * u}px Cairo, sans-serif`;
+      g.fillStyle = pal.sub;
+      g.fillText(o.subtitle, L.W - L.margin, L.headerH * 0.7);
 
-    // مفتاح الخريطة (يسار الترويسة)
-    const legend = [
-      { label: 'حدود البلوك', kind: 'block' },
-      { label: 'قطعة مسجّلة', kind: 'parcel' },
-      { label: 'قطعة مقدّرة', kind: 'estimate' },
-    ];
+      drawLegend(g, L, legendItems(o), pal, u, streetFill);
+    }
+
+    // 9) التذييل
+    if (o.showFooter) {
+      drawNorth(g, L, pal, u);
+      drawScaleBar(g, L, pal, u);
+      g.textAlign = 'left';
+      g.textBaseline = 'middle';
+      g.fillStyle = pal.sub;
+      g.font = `500 ${24 * u}px Cairo, sans-serif`;
+      g.fillText(o.footer, L.margin, L.H - L.footerH / 2);
+    }
+
+    return canvas;
+  }
+
+  function legendItems(o) {
+    const items = [];
+    if (o.showAreaBoundary) items.push({ kind: 'area', label: 'حدود المنطقة' });
+    if (o.blockLines) items.push({ kind: 'block', label: 'حدود البلوك' });
+    if (o.showParcels) {
+      items.push({ kind: 'parcel', label: 'قطعة مسجّلة' });
+      items.push({ kind: 'estimate', label: 'قطعة مقدّرة' });
+    }
+    if (o.showStreets) items.push({ kind: 'street', label: 'شارع' });
+    if (o.showHouses !== 'none') items.push({ kind: 'house', label: 'رقم البيت' });
+    return items;
+  }
+
+  function drawLegend(g, L, items, pal, u, streetFill) {
+    const n = items.length;
     const lx = L.margin;
-    legend.forEach((item, i) => {
-      const y = L.headerH * (0.3 + i * 0.22);
-      const sw = 60 * u;
-      const sh = 26 * u;
+    const sw = 60 * u;
+    const sh = 26 * u;
+    items.forEach((item, i) => {
+      const y = n > 1 ? L.headerH * (0.25 + i * (0.55 / (n - 1))) : L.headerH * 0.5;
       g.save();
-      if (item.kind === 'block') {
-        g.strokeStyle = pal.amber; g.lineWidth = 4 * u;
+      g.lineWidth = 3 * u;
+      if (item.kind === 'area') {
+        g.strokeStyle = pal.amber; g.lineWidth = 6 * u;
+        g.beginPath(); g.moveTo(lx, y); g.lineTo(lx + sw, y); g.stroke();
+      } else if (item.kind === 'block') {
+        g.strokeStyle = pal.amber; g.lineWidth = 3 * u;
         g.strokeRect(lx, y - sh / 2, sw, sh);
       } else if (item.kind === 'parcel') {
-        g.fillStyle = `rgba(${teal}, 0.25)`; g.strokeStyle = `rgba(${teal}, 0.95)`; g.lineWidth = 2 * u;
+        g.fillStyle = `rgba(${pal.teal}, 0.25)`; g.strokeStyle = `rgba(${pal.teal}, 0.95)`; g.lineWidth = 2 * u;
         g.fillRect(lx, y - sh / 2, sw, sh); g.strokeRect(lx, y - sh / 2, sw, sh);
-      } else {
-        g.fillStyle = `rgba(${teal}, 0.25)`; g.strokeStyle = `rgba(${teal}, 0.95)`; g.lineWidth = 2 * u;
+      } else if (item.kind === 'estimate') {
+        g.fillStyle = `rgba(${pal.teal}, 0.25)`; g.strokeStyle = `rgba(${pal.teal}, 0.95)`; g.lineWidth = 2 * u;
         g.setLineDash([5 * u, 4 * u]);
         g.fillRect(lx, y - sh / 2, sw, sh); g.strokeRect(lx, y - sh / 2, sw, sh);
+      } else if (item.kind === 'street') {
+        g.strokeStyle = streetFill; g.lineWidth = 8 * u; g.lineCap = 'round';
+        g.beginPath(); g.moveTo(lx, y); g.lineTo(lx + sw, y); g.stroke();
+      } else if (item.kind === 'house') {
+        g.restore();
+        drawText(g, '12', lx + sw / 2, y, { font: `700 ${30 * u}px Cairo, sans-serif`, fill: pal.text, halo: pal.bg, lineW: 4 * u });
+        g.save();
       }
       g.restore();
       drawText(g, item.label, lx + sw + 16 * u, y, {
         font: `600 ${30 * u}px Cairo, sans-serif`, fill: pal.text, align: 'left',
       });
     });
-
-    // شمال + مقياس رسم داخل الخريطة
-    drawNorth(g, L, pal, u);
-    drawScaleBar(g, L, pal, u);
-
-    // تذييل: الإسناد والمصدر
-    g.textAlign = 'left';
-    g.textBaseline = 'middle';
-    g.fillStyle = pal.sub;
-    g.font = `500 ${24 * u}px Cairo, sans-serif`;
-    g.fillText(o.footer, L.margin, L.H - L.footerH / 2);
-
-    return canvas;
   }
 
   function drawNorth(g, L, pal, u) {
@@ -492,13 +602,12 @@
 
   async function setPngDpi(blob, dpi) {
     const buf = new Uint8Array(await blob.arrayBuffer());
-    // توقيع PNG (8 بايت) + IHDR (25 بايت) = أول 33 بايت
     const ppm = Math.round(dpi / 0.0254);
     const data = new Uint8Array(9);
     const dv = new DataView(data.buffer);
     dv.setUint32(0, ppm);
     dv.setUint32(4, ppm);
-    data[8] = 1; // الوحدة: متر
+    data[8] = 1;
     const chunk = makePngChunk('pHYs', data);
     const out = new Uint8Array(buf.length + chunk.length);
     out.set(buf.subarray(0, 33), 0);
@@ -526,13 +635,19 @@
     return `${ctx.attribution ? ctx.attribution + '  ·  ' : ''}المصدر: OpenStreetMap  ·  القطع المقدّرة تقريبية وليست سجلاً رسمياً`;
   }
 
-  async function renderBlockBlob(ctx, block, { width, format, onProgress }) {
-    const L = buildLayout(width, mercBoundsOfBBox(block.bbox), { pad: 0.16, maxAspect: 1.5 });
-    const canvas = await drawScene(ctx, L, {
-      mode: 'block',
+  function extOf(format) {
+    return format === 'jpeg' ? 'jpg' : 'png';
+  }
+
+  /** تصدير بلوك واحد: style = 'context' | 'outline' */
+  async function renderBlockBlob(ctx, block, { width, format, style, onProgress }) {
+    const outline = style === 'outline';
+    const layout = outline
+      ? buildLayout(width, mercBoundsOfBBox(block.bbox), { pad: 0.06, maxAspect: 1.4, header: false, footer: false })
+      : buildLayout(width, mercBoundsOfBBox(block.bbox), { pad: 0.16, maxAspect: 1.5 });
+    const canvas = await drawScene(ctx, layout, {
+      ...presetOptions(style, ctx, format),
       block,
-      dark: ctx.dark,
-      showHouses: true,
       title: ctx.areaLabel,
       subtitle: `بلوك #${pad2(block.number)}  ·  ${fmt(block.count)} قطعة  ·  ${fmt(block.streets.size)} شارع  ·  ${fmt(block.area)} م²`,
       footer: footerText(ctx),
@@ -545,42 +660,47 @@
     return blob;
   }
 
+  /** تصدير الخريطة الكاملة: style = 'detailed' | 'boundary' */
+  async function renderFullBlob(ctx, { width, format, style, onProgress }) {
+    const layout = buildLayout(width, mercBoundsOfBBox(ctx.bbox), { pad: 0.03, maxAspect: 1.4 });
+    const canvas = await drawScene(ctx, layout, {
+      ...presetOptions(style, ctx, format),
+      block: null,
+      title: ctx.areaLabel,
+      subtitle: style === 'boundary'
+        ? `حدود المنطقة  ·  ${fmt(ctx.blocks.length)} بلوك`
+        : `خريطة مفصّلة  ·  ${fmt(ctx.streets.length)} شارع  ·  ${fmt(ctx.parcels.length)} بيت`,
+      footer: footerText(ctx),
+      onProgress,
+    });
+    onProgress?.(92, 'إنشاء ملف الصورة');
+    const blob = await canvasToBlob(canvas, format);
+    canvas.width = 0;
+    canvas.height = 0;
+    return blob;
+  }
+
   async function exportBlock(ctx, block, opts = {}) {
-    const width = opts.width || 3508;
+    const style = opts.style || 'context';
     const format = opts.format || 'png';
-    const ext = format === 'jpeg' ? 'jpg' : 'png';
-    const blob = await renderBlockBlob(ctx, block, { width, format, onProgress: opts.onProgress });
-    saveAs(blob, `${safeName(ctx.areaLabel)} - بلوك ${pad2(block.number)}.${ext}`);
+    const blob = await renderBlockBlob(ctx, block, { width: opts.width || 3508, format, style, onProgress: opts.onProgress });
+    const suffix = style === 'outline' ? 'حدود بلوك' : 'بلوك';
+    saveAs(blob, `${safeName(ctx.areaLabel)} - ${suffix} ${pad2(block.number)}.${extOf(format)}`);
     opts.onProgress?.(100, 'تم الحفظ');
   }
 
   async function exportFull(ctx, opts = {}) {
-    const width = opts.width || 3508;
+    const style = opts.style || 'detailed';
     const format = opts.format || 'png';
-    const ext = format === 'jpeg' ? 'jpg' : 'png';
-    const L = buildLayout(width, mercBoundsOfBBox(ctx.bbox), { pad: 0.04, maxAspect: 1.4 });
-    const canvas = await drawScene(ctx, L, {
-      mode: 'full',
-      block: null,
-      dark: ctx.dark,
-      showHouses: false,
-      title: ctx.areaLabel,
-      subtitle: `خريطة كاملة  ·  ${fmt(ctx.blocks.length)} بلوك  ·  ${fmt(ctx.parcels.length)} قطعة`,
-      footer: footerText(ctx),
-      onProgress: opts.onProgress,
-    });
-    opts.onProgress?.(92, 'إنشاء ملف الصورة');
-    const blob = await canvasToBlob(canvas, format);
-    canvas.width = 0;
-    canvas.height = 0;
-    saveAs(blob, `${safeName(ctx.areaLabel)} - خريطة كاملة.${ext}`);
+    const blob = await renderFullBlob(ctx, { width: opts.width || 3508, format, style, onProgress: opts.onProgress });
+    const name = style === 'boundary' ? 'حدود المنطقة' : 'خريطة مفصّلة';
+    saveAs(blob, `${safeName(ctx.areaLabel)} - ${name}.${extOf(format)}`);
     opts.onProgress?.(100, 'تم الحفظ');
   }
 
   async function exportBatch(ctx, opts = {}) {
-    const width = opts.width || 3508;
+    const style = opts.style || 'context';
     const format = opts.format || 'png';
-    const ext = format === 'jpeg' ? 'jpg' : 'png';
     const total = ctx.blocks.length;
     const zip = new JSZip();
 
@@ -589,17 +709,19 @@
       const base = (i / total) * 100;
       const span = 100 / total;
       const blob = await renderBlockBlob(ctx, b, {
-        width,
+        width: opts.width || 3508,
         format,
+        style,
         onProgress: (p, text) => opts.onProgress?.(base + (span * p) / 100, `بلوك ${i + 1} من ${total} · ${text || ''}`.trim()),
       });
-      zip.file(`block-${pad2(b.number)}.${ext}`, blob);
+      zip.file(`block-${pad2(b.number)}.${extOf(format)}`, blob);
       await tick();
     }
 
     opts.onProgress?.(98, 'ضغط الملفات');
     const zipBlob = await zip.generateAsync({ type: 'blob', compression: 'STORE' });
-    saveAs(zipBlob, `${safeName(ctx.areaLabel)} - كل البلوكات.zip`);
+    const suffix = style === 'outline' ? 'حدود البلوكات' : 'كل البلوكات';
+    saveAs(zipBlob, `${safeName(ctx.areaLabel)} - ${suffix}.zip`);
     opts.onProgress?.(100, 'تم');
   }
 

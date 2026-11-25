@@ -1383,7 +1383,7 @@ async function exportBlock(block) {
 
   showProgress(`تصدير البلوك #${pad2(block.number)}`, 2);
   try {
-    await BlockExporter.exportBlock(exportContext(), block, { width, format, onProgress: setProgress });
+    await BlockExporter.exportBlock(exportContext(), block, { width, format, style: $('blockExportStyle').value, onProgress: setProgress });
     toast('تم حفظ صورة البلوك بجودة عالية');
   } catch (err) {
     console.error(err);
@@ -1399,7 +1399,7 @@ async function exportFull() {
   const format = $('exportFormat').value;
   showProgress('تصدير الخريطة الكاملة', 2);
   try {
-    await BlockExporter.exportFull(exportContext(), { width, format, onProgress: setProgress });
+    await BlockExporter.exportFull(exportContext(), { width, format, style: $('fullExportStyle').value, onProgress: setProgress });
     toast('تم حفظ الخريطة الكاملة');
   } catch (err) {
     console.error(err);
@@ -1415,7 +1415,7 @@ async function exportBatch() {
   const format = $('exportFormat').value;
   showProgress(`تصدير ${state.blocks.length} بلوك`, 1);
   try {
-    await BlockExporter.exportBatch(exportContext(), { width, format, onProgress: setProgress });
+    await BlockExporter.exportBatch(exportContext(), { width, format, style: $('blockExportStyle').value, onProgress: setProgress });
     toast('تم تجهيز ملف ZIP بجميع البلوكات');
   } catch (err) {
     console.error(err);
